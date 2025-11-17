@@ -5,7 +5,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 src_path = os.path.join(project_root, 'src', 'utils')
 sys.path.insert(0, project_root)
 try:
-    from src.utils.dataloaders import get_survey_data_loader, get_sensor_hrv_loader, get_sleep_diary_loader
+    from src.utils.base_dataloaders import get_survey_data_loader, get_sensor_hrv_loader, get_sleep_diary_loader
 except ImportError:
     print(f"Error: Could not import data_loaders from {src_path}")
     print("Please ensure 'src/utils/data_loaders.py' exists and this script is run from the project root.")

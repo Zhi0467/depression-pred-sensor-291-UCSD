@@ -81,7 +81,14 @@ class SurveyDataset(Dataset):
             nan_fill_value (float, optional): Value to fill NaNs with.
             normalize (bool, optional): Whether to apply StandardScaler to features.
         """
-        self.feature_cols = feature_cols
+        if feature_cols is None:
+            print("Warning: 'feature_cols' not provided to SurveyDataset. Using default list.")
+            self.feature_cols = [
+                'sex', 'age', 'marriage', 'smartwatch', 'regular', 
+                'exercise', 'coffee', 'smoking', 'drinking', 'height', 'weight'
+            ]
+        else:
+            self.feature_cols = feature_cols
         self.label_cols = label_cols
         self.id_col = id_col
 
@@ -142,7 +149,14 @@ class SequenceDataset(Dataset):
             nan_fill_value (float, optional): Value to fill NaNs with.
             normalize (bool, optional): Whether to apply StandardScaler to features.
         """
-        self.feature_cols = feature_cols
+        if feature_cols is None:
+            print("Warning: 'feature_cols' not provided to SequenceDataset. Using default list.")
+            self.feature_cols = [
+                'sleep_duration', 'in_bed_duration', 'sleep_latency', 
+                'sleep_efficiency', 'waso', 'wakeup@night'
+            ]
+        else:
+            self.feature_cols = feature_cols
         self.id_col = id_col
 
         if dataframe is not None:
