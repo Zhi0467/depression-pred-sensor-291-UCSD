@@ -1,4 +1,6 @@
-torch 
+torch
 pandas
 scikit-learn
 numpy
+matplotlib
+pytest
