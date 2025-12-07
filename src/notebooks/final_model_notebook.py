@@ -20,6 +20,7 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -337,7 +338,7 @@ def _(np):
         for user_id in sorted(seq_data.keys()):
             df = seq_data[user_id]
             # Fill NaN values before aggregation
-            features = df[feature_cols].fillna(0).values
+            features = df[feature_cols].fillna(df[feature_cols].mean()).values
 
             if len(features) == 0:
                 # Handle empty sequences
@@ -361,6 +362,7 @@ def _(np):
         for user_id, group in df.groupby(id_col):
             seq_data[user_id] = group[feature_cols].copy()
         return seq_data
+
     return aggregate_sequences, prepare_sequence_data
 
 
@@ -390,7 +392,11 @@ def _(
     survey_data = df_survey[df_survey["deviceId"].isin(common_users)].sort_values(
         "deviceId"
     )
-    X_survey_raw = survey_data[SURVEY_FEATURE_COLS].fillna(0).values
+    X_survey_raw = (
+        survey_data[SURVEY_FEATURE_COLS]
+        .fillna(survey_data[SURVEY_FEATURE_COLS].mean())
+        .values
+    )
     y_all = survey_data[TARGET_LABELS].fillna(0).values
     user_ids = survey_data["deviceId"].tolist()
 
@@ -418,10 +424,16 @@ def _(
 
 
 @app.cell
-def _(DIARY_FEATURE_COLS, SENSOR_FEATURE_COLS, SURVEY_FEATURE_COLS, mo):
+def _(mo):
     # Interactive feature selection
-    mo.md("### Feature Selection")
+    mo.md("""
+    ### Feature Selection
+    """)
+    return
 
+
+@app.cell
+def _(DIARY_FEATURE_COLS, SENSOR_FEATURE_COLS, SURVEY_FEATURE_COLS):
     # Create feature options with source labels
     survey_options = {f"[Survey] {f}": f for f in SURVEY_FEATURE_COLS}
     diary_options = {f"[Diary] {f}_mean": f"{f}_mean" for f in DIARY_FEATURE_COLS}
