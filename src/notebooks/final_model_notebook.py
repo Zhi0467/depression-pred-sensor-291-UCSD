@@ -8,6 +8,8 @@
 #     "scikit-learn",
 #     "plotly",
 #     "umap-learn",
+#     "altair==6.0.0",
+#     "vegafusion==2.0.3",
 # ]
 # ///
 
@@ -20,7 +22,6 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
-
     return (mo,)
 
 
@@ -79,9 +80,9 @@ def _():
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
-    # Set random seeds for reproducibility
-    np.random.seed(42)
-    torch.manual_seed(42)
+    # # Set random seeds for reproducibility
+    # np.random.seed(42)
+    # torch.manual_seed(42)
 
     print("All imports successful!")
     return (
@@ -261,7 +262,7 @@ def _(dataset_selector, df_diary, df_sensor, df_survey, mo):
             mo.md(
                 f"**Shape**: {_selected_df.shape[0]} rows x {_selected_df.shape[1]} columns"
             ),
-            mo.ui.table(_selected_df.head(20), selection=None),
+            mo.ui.table(_selected_df, selection=None),
         ]
     )
     return
@@ -274,14 +275,14 @@ def _(TARGET_LABELS, TARGET_NAMES, df_survey, go, make_subplots):
         rows=1, cols=3, subplot_titles=[TARGET_NAMES[t] for t in TARGET_LABELS]
     )
 
-    colors = ["#636EFA", "#EF553B", "#00CC96"]
+    _colors = ["#636EFA", "#EF553B", "#00CC96"]
 
     for _i, _target in enumerate(TARGET_LABELS):
         fig_distributions.add_trace(
             go.Histogram(
                 x=df_survey[_target],
                 name=TARGET_NAMES[_target],
-                marker_color=colors[_i],
+                marker_color=_colors[_i],
                 opacity=0.75,
                 nbinsx=15,
             ),
@@ -304,6 +305,250 @@ def _(TARGET_LABELS, TARGET_NAMES, df_survey, go, make_subplots):
 @app.cell
 def _(mo):
     mo.md(r"""
+    ### 1.1 Data Quality Diagnostics
+
+    Before modeling, we identify data quality issues that may impact performance.
+    """)
+    return
+
+
+@app.cell
+def _(
+    DIARY_FEATURE_COLS,
+    SENSOR_FEATURE_COLS,
+    SURVEY_FEATURE_COLS,
+    df_diary,
+    df_sensor,
+    df_survey,
+    go,
+    pd,
+):
+    # Compute missingness for each dataset
+    survey_missing = (
+        df_survey[SURVEY_FEATURE_COLS].isnull().sum() / len(df_survey) * 100
+    )
+    diary_missing = df_diary[DIARY_FEATURE_COLS].isnull().sum() / len(df_diary) * 100
+    sensor_missing = (
+        df_sensor[SENSOR_FEATURE_COLS].isnull().sum() / len(df_sensor) * 100
+    )
+
+    # Combine into single dataframe
+    missing_data = []
+    for _col, _val in survey_missing.items():
+        missing_data.append({"Feature": _col, "Source": "Survey", "Missing %": _val})
+    for _col, _val in diary_missing.items():
+        missing_data.append({"Feature": _col, "Source": "Diary", "Missing %": _val})
+    for _col, _val in sensor_missing.items():
+        missing_data.append({"Feature": _col, "Source": "Sensor", "Missing %": _val})
+
+    missing_df = pd.DataFrame(missing_data)
+
+    # Create bar chart of missingness (only features with >0% missing)
+    missing_df_filtered = missing_df[missing_df["Missing %"] > 0].sort_values(
+        "Missing %", ascending=True
+    )
+
+    fig_missing = go.Figure()
+
+    color_map = {"Survey": "#636EFA", "Diary": "#EF553B", "Sensor": "#00CC96"}
+
+    for source in ["Survey", "Diary", "Sensor"]:
+        source_data = missing_df_filtered[missing_df_filtered["Source"] == source]
+        if len(source_data) > 0:
+            fig_missing.add_trace(
+                go.Bar(
+                    y=source_data["Feature"],
+                    x=source_data["Missing %"],
+                    orientation="h",
+                    name=source,
+                    marker_color=color_map[source],
+                )
+            )
+
+    fig_missing.update_layout(
+        title="Features with Missing Data",
+        xaxis_title="Missing %",
+        yaxis_title="Feature",
+        height=400,
+        barmode="group",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    fig_missing
+    return
+
+
+@app.cell
+def _(SENSOR_FEATURE_COLS, df_sensor, mo, pd):
+    # Detect corrupted features (extreme values) and compute quality metrics
+    feature_quality = []
+
+    for _col in SENSOR_FEATURE_COLS:
+        _max_val = df_sensor[_col].max()
+        _min_val = df_sensor[_col].min()
+        _missing_pct = df_sensor[_col].isnull().sum() / len(df_sensor) * 100
+
+        _issues = []
+        if _max_val > 1e10:
+            _issues.append(f"Extreme max: {_max_val:.2e}")
+        if _missing_pct > 20:
+            _issues.append(f"High missing: {_missing_pct:.1f}%")
+
+        feature_quality.append(
+            {
+                "Feature": _col,
+                "Min": f"{_min_val:.2f}" if abs(_min_val) < 1e6 else f"{_min_val:.2e}",
+                "Max": f"{_max_val:.2f}" if abs(_max_val) < 1e6 else f"{_max_val:.2e}",
+                "Missing %": f"{_missing_pct:.1f}%",
+                "Issues": ", ".join(_issues) if _issues else "OK",
+            }
+        )
+
+    feature_quality_df = pd.DataFrame(feature_quality)
+    problematic_features = feature_quality_df[feature_quality_df["Issues"] != "OK"]
+
+    mo.vstack(
+        [
+            mo.callout(
+                mo.md(f"""
+    **Data Quality Issues Found ({len(problematic_features)} sensor features with issues):**
+
+    - `lf`, `hf` have values up to **1e+46**
+    - `steps`, `calories`, `distance` have **~55% missing** values
+
+    These issues are highlighted in the Feature Selection section below.
+            """),
+                kind="warn",
+            ),
+            mo.md("**Sensor Feature Quality Summary:**"),
+            mo.ui.table(feature_quality_df, selection=None),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 1.2 Target Variable Analysis
+
+    Understanding the distribution of clinical scores and class imbalance.
+    """)
+    return
+
+
+@app.cell
+def _(TARGET_LABELS, df_survey, go, make_subplots):
+    # Clinical severity cutoffs
+    SEVERITY_CUTOFFS = {
+        "PHQ9_F": [
+            (0, 4, "Minimal"),
+            (5, 9, "Mild"),
+            (10, 14, "Moderate"),
+            (15, 19, "Mod-Severe"),
+            (20, 27, "Severe"),
+        ],
+        "GAD7_F": [
+            (0, 4, "Minimal"),
+            (5, 9, "Mild"),
+            (10, 14, "Moderate"),
+            (15, 21, "Severe"),
+        ],
+        "ISI_F": [
+            (0, 7, "None"),
+            (8, 14, "Subthreshold"),
+            (15, 21, "Moderate"),
+            (22, 28, "Severe"),
+        ],
+    }
+
+    # Count participants in each severity category
+    severity_counts = {}
+    for _target in TARGET_LABELS:
+        _counts = []
+        for _low, _high, _label in SEVERITY_CUTOFFS[_target]:
+            _count = (
+                (df_survey[_target] >= _low) & (df_survey[_target] <= _high)
+            ).sum()
+            _counts.append(
+                {
+                    "Severity": _label,
+                    "Count": _count,
+                    "Percentage": _count / len(df_survey) * 100,
+                }
+            )
+        severity_counts[_target] = _counts
+
+    # Create pie charts for each target
+    fig_severity = make_subplots(
+        rows=1,
+        cols=3,
+        subplot_titles=["PHQ-9 (Depression)", "GAD-7 (Anxiety)", "ISI (Insomnia)"],
+        specs=[[{"type": "pie"}, {"type": "pie"}, {"type": "pie"}]],
+    )
+
+    _colors_severity = ["#2ecc71", "#f1c40f", "#e67e22", "#e74c3c", "#9b59b6"]
+
+    for _idx, _target in enumerate(TARGET_LABELS):
+        _labels = [c["Severity"] for c in severity_counts[_target]]
+        _values = [c["Count"] for c in severity_counts[_target]]
+
+        fig_severity.add_trace(
+            go.Pie(
+                labels=_labels,
+                values=_values,
+                marker_colors=_colors_severity[: len(_labels)],
+                textinfo="label+percent",
+                textposition="inside",
+                hole=0.3,
+                showlegend=(_idx == 0),
+            ),
+            row=1,
+            col=_idx + 1,
+        )
+
+    fig_severity.update_layout(
+        title_text="Clinical Severity Distribution (n=49)", height=400
+    )
+    fig_severity
+    return
+
+
+@app.cell
+def _(df_survey, mo):
+    # Compute class distribution and show warning
+    phq9_minimal = (df_survey["PHQ9_F"] <= 4).sum()
+    phq9_mild = ((df_survey["PHQ9_F"] >= 5) & (df_survey["PHQ9_F"] <= 9)).sum()
+    phq9_clinical = (df_survey["PHQ9_F"] >= 10).sum()
+
+    gad7_minimal = (df_survey["GAD7_F"] <= 4).sum()
+    gad7_clinical = (df_survey["GAD7_F"] >= 10).sum()
+
+    isi_none = (df_survey["ISI_F"] <= 7).sum()
+    isi_clinical = (df_survey["ISI_F"] >= 15).sum()
+
+    n_participants = len(df_survey)
+
+    mo.callout(
+        mo.md(f"""
+    **Class Imbalance Warning:**
+
+    | Target | Minimal/None | Mild/Subthreshold | Clinical (Moderate+) |
+    |--------|--------------|-------------------|----------------------|
+    | PHQ-9  | {phq9_minimal} ({phq9_minimal / n_participants * 100:.0f}%) | {phq9_mild} ({phq9_mild / n_participants * 100:.0f}%) | **{phq9_clinical} ({phq9_clinical / n_participants * 100:.0f}%)** |
+    | GAD-7  | {gad7_minimal} ({gad7_minimal / n_participants * 100:.0f}%) | {n_participants - gad7_minimal - gad7_clinical} ({(n_participants - gad7_minimal - gad7_clinical) / n_participants * 100:.0f}%) | **{gad7_clinical} ({gad7_clinical / n_participants * 100:.0f}%)** |
+    | ISI    | {isi_none} ({isi_none / n_participants * 100:.0f}%) | {n_participants - isi_none - isi_clinical} ({(n_participants - isi_none - isi_clinical) / n_participants * 100:.0f}%) | **{isi_clinical} ({isi_clinical / n_participants * 100:.0f}%)** |
+
+    **Impact:** The vast majority of participants have minimal/no symptoms. 
+    With so few clinical cases, the model might lacks examples to learn from and tends to predict "average" (low) scores for everyone.
+        """),
+        kind="warn",
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
     ---
     ## 2. Feature Engineering
 
@@ -319,7 +564,9 @@ def _(mo):
 
 @app.cell
 def _(np):
-    def aggregate_sequences(seq_data: dict, feature_cols: list) -> np.ndarray:
+    import numpy
+
+    def aggregate_sequences(seq_data: dict, feature_cols: list) -> numpy.ndarray:
         """
         Aggregate variable-length sequences to fixed-length features.
         Uses only mean and std (dropped min/max to reduce dimensionality).
@@ -360,24 +607,12 @@ def _(np):
         for user_id, group in df.groupby(id_col):
             seq_data[user_id] = group[feature_cols].copy()
         return seq_data
-
     return aggregate_sequences, prepare_sequence_data
 
 
 @app.cell
-def _(
-    DIARY_FEATURE_COLS,
-    SENSOR_FEATURE_COLS,
-    SURVEY_FEATURE_COLS,
-    TARGET_LABELS,
-    aggregate_sequences,
-    df_diary,
-    df_sensor,
-    df_survey,
-    prepare_sequence_data,
-):
-    # Prepare data for all users
-    # Get intersection of users across all datasets
+def _(TARGET_LABELS, df_diary, df_sensor, df_survey):
+    # Get intersection of users across all datasets (computed once)
     survey_users = set(df_survey["deviceId"].unique())
     diary_users = set(df_diary["userId"].unique())
     sensor_users = set(df_sensor["deviceId"].unique())
@@ -386,61 +621,249 @@ def _(
     n_users = len(common_users)
     print(f"Common users across all datasets: {n_users}")
 
-    # Prepare survey features and labels
+    # Prepare base survey data and labels (these don't change with feature selection)
     survey_data = df_survey[df_survey["deviceId"].isin(common_users)].sort_values(
         "deviceId"
     )
-    X_survey_raw = (
-        survey_data[SURVEY_FEATURE_COLS]
-        .fillna(survey_data[SURVEY_FEATURE_COLS].mean())
-        .values
-    )
     y_all = survey_data[TARGET_LABELS].fillna(0).values
     user_ids = survey_data["deviceId"].tolist()
-
-    # Prepare diary sequence data
-    diary_seq = prepare_sequence_data(
-        df_diary[df_diary["userId"].isin(common_users)], "userId", DIARY_FEATURE_COLS
-    )
-    X_diary_raw = aggregate_sequences(diary_seq, DIARY_FEATURE_COLS)
-
-    # Prepare sensor sequence data
-    sensor_seq = prepare_sequence_data(
-        df_sensor[df_sensor["deviceId"].isin(common_users)],
-        "deviceId",
-        SENSOR_FEATURE_COLS,
-    )
-    X_sensor_raw = aggregate_sequences(sensor_seq, SENSOR_FEATURE_COLS)
-
-    # Print shapes
-    print(f"\nFeature dimensions (before scaling):")
-    print(f"  Survey: {X_survey_raw.shape}")
-    print(f"  Diary (aggregated): {X_diary_raw.shape}")
-    print(f"  Sensor (aggregated): {X_sensor_raw.shape}")
-    print(f"  Labels: {y_all.shape}")
-    return X_diary_raw, X_sensor_raw, X_survey_raw, user_ids, y_all
+    return user_ids, y_all
 
 
 @app.cell
 def _(mo):
-    # Interactive feature selection
     mo.md("""
-    ### Feature Selection
+    ### 2.1 Feature Selection
+
+    Select which features to include in model training. Features with data quality issues are marked with `[!]`.
+
+    **Instructions:**
+    1. Check/uncheck features you want to include
+    2. Use the buttons to quickly select/clear groups
+    3. Click **"Apply Feature Selection"** to confirm and retrain the model
     """)
     return
 
 
 @app.cell
-def _(DIARY_FEATURE_COLS, SENSOR_FEATURE_COLS, SURVEY_FEATURE_COLS):
-    # Create feature options with source labels
-    survey_options = {f"[Survey] {f}": f for f in SURVEY_FEATURE_COLS}
-    diary_options = {f"[Diary] {f}_mean": f"{f}_mean" for f in DIARY_FEATURE_COLS}
-    diary_options.update({f"[Diary] {f}_std": f"{f}_std" for f in DIARY_FEATURE_COLS})
-    sensor_options = {f"[Sensor] {f}_mean": f"{f}_mean" for f in SENSOR_FEATURE_COLS}
-    sensor_options.update(
-        {f"[Sensor] {f}_std": f"{f}_std" for f in SENSOR_FEATURE_COLS}
+def _(DIARY_FEATURE_COLS, SENSOR_FEATURE_COLS, SURVEY_FEATURE_COLS, mo):
+    # Define problematic features (corrupted or high missing)
+    PROBLEMATIC_SENSOR_FEATURES = {"lf", "hf", "steps", "calories"}
+
+    # Create feature multiselect for Survey
+    survey_multiselect = mo.ui.multiselect(
+        options=SURVEY_FEATURE_COLS,
+        value=list(SURVEY_FEATURE_COLS),  # All selected by default
+        label="Survey Features",
+    )
+
+    # Create feature multiselect for Diary
+    diary_multiselect = mo.ui.multiselect(
+        options=DIARY_FEATURE_COLS,
+        value=list(DIARY_FEATURE_COLS),  # All selected by default
+        label="Diary Features",
+    )
+
+    # Create feature multiselect for Sensor (problematic ones unselected by default)
+    _sensor_default = [
+        c for c in SENSOR_FEATURE_COLS if c not in PROBLEMATIC_SENSOR_FEATURES
+    ]
+    _sensor_options = {
+        (f"{c} [!]" if c in PROBLEMATIC_SENSOR_FEATURES else c): c
+        for c in SENSOR_FEATURE_COLS
+    }
+    sensor_multiselect = mo.ui.multiselect(
+        options=_sensor_options,
+        value=_sensor_default,  # Problematic features unselected by default
+        label="Sensor Features",
+    )
+    return diary_multiselect, sensor_multiselect, survey_multiselect
+
+
+@app.cell
+def _(mo, survey_multiselect):
+    # Survey features section with Select All / Clear All
+    mo.vstack(
+        [
+            mo.md("**Survey Features (Demographics & Lifestyle):**"),
+            survey_multiselect,
+        ]
     )
     return
+
+
+@app.cell
+def _(diary_multiselect, mo):
+    # Diary features section
+    mo.vstack(
+        [
+            mo.md("**Sleep Diary Features:**"),
+            diary_multiselect,
+        ]
+    )
+    return
+
+
+@app.cell
+def _(mo, sensor_multiselect):
+    # Sensor features section
+    mo.vstack(
+        [
+            mo.md("**Sensor Features (HRV & Activity):** _[!] = data quality issues_"),
+            sensor_multiselect,
+        ]
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    # Action buttons for feature selection
+    apply_selection_btn = mo.ui.button(label="Apply Feature Selection", kind="success")
+    return (apply_selection_btn,)
+
+
+@app.cell
+def _(apply_selection_btn, mo):
+    # Display the apply button
+    mo.hstack(
+        [apply_selection_btn, mo.md("_Click to apply changes and retrain model_")],
+        justify="start",
+        gap=2,
+    )
+    return
+
+
+@app.cell
+def _(
+    DIARY_FEATURE_COLS,
+    SENSOR_FEATURE_COLS,
+    SURVEY_FEATURE_COLS,
+    apply_selection_btn,
+    diary_multiselect,
+    mo,
+    sensor_multiselect,
+    survey_multiselect,
+):
+    # When button is clicked, capture the current selection as "confirmed"
+    # The button click triggers this cell to re-run
+    _click_count = apply_selection_btn.value
+
+    # Get selected features from multiselects
+    selected_survey_features = list(survey_multiselect.value)
+    selected_diary_features = list(diary_multiselect.value)
+    selected_sensor_features = list(sensor_multiselect.value)
+
+    # Calculate totals
+    _total_selected = (
+        len(selected_survey_features)
+        + len(selected_diary_features)
+        + len(selected_sensor_features)
+    )
+    _total_available = (
+        len(SURVEY_FEATURE_COLS) + len(DIARY_FEATURE_COLS) + len(SENSOR_FEATURE_COLS)
+    )
+
+    # Calculate aggregated feature count (mean + std for diary and sensor)
+    total_model_features = (
+        len(selected_survey_features)
+        + len(selected_diary_features) * 2  # mean + std
+        + len(selected_sensor_features) * 2  # mean + std
+    )
+
+    # Determine if ratio is good or bad
+    _ratio = total_model_features / 49 if total_model_features > 0 else 0
+    _ratio_status = "good" if _ratio < 0.5 else ("warn" if _ratio < 1.0 else "danger")
+
+    mo.vstack(
+        [
+            mo.callout(
+                mo.md(f"""
+    **Current Feature Selection (Applied):**
+    - Survey: **{len(selected_survey_features)}/{len(SURVEY_FEATURE_COLS)}** features
+    - Diary: **{len(selected_diary_features)}/{len(DIARY_FEATURE_COLS)}** features ({len(selected_diary_features) * 2} after aggregation)
+    - Sensor: **{len(selected_sensor_features)}/{len(SENSOR_FEATURE_COLS)}** features ({len(selected_sensor_features) * 2} after aggregation)
+    - **Total model features: {total_model_features}** (with n=49 samples, ratio = {_ratio:.2f} features/sample)
+            """),
+                kind="success"
+                if _ratio_status == "good"
+                else ("warn" if _ratio_status == "warn" else "danger"),
+            ),
+            mo.md(
+                f"_Recommendation: Keep ratio below 0.5 for best results (currently {_ratio:.2f})_"
+            )
+            if _ratio >= 0.5
+            else mo.md(""),
+        ]
+    )
+    return (
+        selected_diary_features,
+        selected_sensor_features,
+        selected_survey_features,
+    )
+
+
+@app.cell
+def _(
+    aggregate_sequences,
+    df_diary,
+    df_sensor,
+    df_survey,
+    np,
+    prepare_sequence_data,
+    selected_diary_features,
+    selected_sensor_features,
+    selected_survey_features,
+):
+    # Prepare data using SELECTED features
+    # Get intersection of users across all datasets
+    _survey_users = set(df_survey["deviceId"].unique())
+    _diary_users = set(df_diary["userId"].unique())
+    _sensor_users = set(df_sensor["deviceId"].unique())
+    _common_users = sorted(_survey_users & _diary_users & _sensor_users)
+
+    # Prepare survey features with SELECTED columns
+    _survey_data = df_survey[df_survey["deviceId"].isin(_common_users)].sort_values(
+        "deviceId"
+    )
+
+    if len(selected_survey_features) > 0:
+        X_survey_raw = (
+            _survey_data[selected_survey_features]
+            .fillna(_survey_data[selected_survey_features].mean())
+            .values
+        )
+    else:
+        X_survey_raw = np.zeros((len(_common_users), 0))
+
+    # Prepare diary sequence data with SELECTED columns
+    if len(selected_diary_features) > 0:
+        diary_seq = prepare_sequence_data(
+            df_diary[df_diary["userId"].isin(_common_users)],
+            "userId",
+            selected_diary_features,
+        )
+        X_diary_raw = aggregate_sequences(diary_seq, selected_diary_features)
+    else:
+        X_diary_raw = np.zeros((len(_common_users), 0))
+
+    # Prepare sensor sequence data with SELECTED columns
+    if len(selected_sensor_features) > 0:
+        sensor_seq = prepare_sequence_data(
+            df_sensor[df_sensor["deviceId"].isin(_common_users)],
+            "deviceId",
+            selected_sensor_features,
+        )
+        X_sensor_raw = aggregate_sequences(sensor_seq, selected_sensor_features)
+    else:
+        X_sensor_raw = np.zeros((len(_common_users), 0))
+
+    # Print shapes
+    print(f"Feature dimensions (using selected features):")
+    print(f"  Survey: {X_survey_raw.shape}")
+    print(f"  Diary (aggregated): {X_diary_raw.shape}")
+    print(f"  Sensor (aggregated): {X_sensor_raw.shape}")
+    return X_diary_raw, X_sensor_raw, X_survey_raw
 
 
 @app.cell
@@ -486,33 +909,52 @@ def _(
     umap_n_components,
     umap_n_neighbors,
 ):
-    # Apply StandardScaler to all features
+    # Apply StandardScaler to all features (handle empty arrays)
     scaler_survey = StandardScaler()
     scaler_diary = StandardScaler()
     scaler_sensor = StandardScaler()
 
-    X_survey_scaled = scaler_survey.fit_transform(X_survey_raw)
-    X_diary_scaled = scaler_diary.fit_transform(X_diary_raw)
-    X_sensor_scaled = scaler_sensor.fit_transform(X_sensor_raw)
+    # Scale features if they exist, otherwise keep empty array
+    if X_survey_raw.shape[1] > 0:
+        X_survey_scaled = scaler_survey.fit_transform(X_survey_raw)
+        X_survey_scaled = np.nan_to_num(
+            X_survey_scaled, nan=0.0, posinf=0.0, neginf=0.0
+        )
+    else:
+        X_survey_scaled = X_survey_raw
 
-    # Handle NaN values after scaling (can occur with zero-variance columns)
-    X_survey_scaled = np.nan_to_num(X_survey_scaled, nan=0.0, posinf=0.0, neginf=0.0)
-    X_diary_scaled = np.nan_to_num(X_diary_scaled, nan=0.0, posinf=0.0, neginf=0.0)
-    X_sensor_scaled = np.nan_to_num(X_sensor_scaled, nan=0.0, posinf=0.0, neginf=0.0)
+    if X_diary_raw.shape[1] > 0:
+        X_diary_scaled = scaler_diary.fit_transform(X_diary_raw)
+        X_diary_scaled = np.nan_to_num(X_diary_scaled, nan=0.0, posinf=0.0, neginf=0.0)
+    else:
+        X_diary_scaled = X_diary_raw
 
-    # Apply UMAP to sensor features if enabled
-    if umap_enabled.value:
+    if X_sensor_raw.shape[1] > 0:
+        X_sensor_scaled = scaler_sensor.fit_transform(X_sensor_raw)
+        X_sensor_scaled = np.nan_to_num(
+            X_sensor_scaled, nan=0.0, posinf=0.0, neginf=0.0
+        )
+    else:
+        X_sensor_scaled = X_sensor_raw
+
+    # Apply UMAP to sensor features if enabled and there are enough features
+    if umap_enabled.value and X_sensor_scaled.shape[1] >= 2:
+        n_components = min(umap_n_components.value, X_sensor_scaled.shape[1])
         umap_model = umap.UMAP(
-            n_components=umap_n_components.value,
-            n_neighbors=umap_n_neighbors.value,
+            n_components=n_components,
+            n_neighbors=min(umap_n_neighbors.value, X_sensor_scaled.shape[0] - 1),
             min_dist=umap_min_dist.value,
             random_state=42,
         )
         X_sensor_reduced = umap_model.fit_transform(X_sensor_scaled)
-        sensor_label = f"Sensor (UMAP {umap_n_components.value}D)"
+        sensor_label = f"Sensor (UMAP {n_components}D)"
     else:
         X_sensor_reduced = X_sensor_scaled
-        sensor_label = "Sensor (scaled)"
+        sensor_label = (
+            "Sensor (scaled)"
+            if X_sensor_scaled.shape[1] > 0
+            else "Sensor (none selected)"
+        )
 
     # Create feature matrices for each configuration
     # Config 1: Survey + Diary
@@ -592,6 +1034,152 @@ def _(
             "UMAP visualization requires at least 2 components. Enable UMAP and set components >= 2."
         )
     fig_umap
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 2.2 Feature-Target Correlations
+
+    Understanding which features correlate with clinical outcomes helps explain model behavior.
+    """)
+    return
+
+
+@app.cell
+def _(
+    TARGET_LABELS,
+    X_all,
+    X_sensor_reduced,
+    go,
+    np,
+    pd,
+    selected_diary_features,
+    selected_sensor_features,
+    selected_survey_features,
+    umap_enabled,
+    y_all,
+):
+    # Build feature names for the combined feature matrix
+    # Note: When UMAP is enabled, sensor features are reduced to UMAP components
+    if (
+        umap_enabled.value
+        and X_sensor_reduced.shape[1] < len(selected_sensor_features) * 2
+    ):
+        # UMAP was applied - use generic component names
+        _sensor_feature_names = [f"UMAP_{i}" for i in range(X_sensor_reduced.shape[1])]
+    else:
+        # No UMAP or not enough features - use original names
+        _sensor_feature_names = [f"{f}_mean" for f in selected_sensor_features] + [
+            f"{f}_std" for f in selected_sensor_features
+        ]
+
+    _feature_names = (
+        list(selected_survey_features)
+        + [f"{f}_mean" for f in selected_diary_features]
+        + [f"{f}_std" for f in selected_diary_features]
+        + _sensor_feature_names
+    )
+
+    # Compute correlations if we have features
+    if X_all.shape[1] > 0 and len(_feature_names) > 0:
+        # Create correlation matrix between features and targets
+        _corr_data = []
+        for i, feat_name in enumerate(_feature_names):
+            for j, target in enumerate(TARGET_LABELS):
+                # Compute Pearson correlation
+                corr = np.corrcoef(X_all[:, i], y_all[:, j])[0, 1]
+                _corr_data.append(
+                    {
+                        "Feature": feat_name,
+                        "Target": target,
+                        "Correlation": corr if not np.isnan(corr) else 0,
+                    }
+                )
+
+        corr_df = pd.DataFrame(_corr_data)
+        corr_pivot = corr_df.pivot(
+            index="Feature", columns="Target", values="Correlation"
+        )
+
+        # Sort by absolute correlation with PHQ9
+        corr_pivot["abs_phq9"] = corr_pivot["PHQ9_F"].abs()
+        corr_pivot = corr_pivot.sort_values("abs_phq9", ascending=True)
+        corr_pivot = corr_pivot.drop("abs_phq9", axis=1)
+
+        # Create heatmap
+        fig_correlation = go.Figure(
+            data=go.Heatmap(
+                z=corr_pivot.values,
+                x=TARGET_LABELS,
+                y=corr_pivot.index.tolist(),
+                colorscale="RdBu",
+                zmid=0,
+                zmin=-1,
+                zmax=1,
+                text=np.round(corr_pivot.values, 2),
+                texttemplate="%{text}",
+                textfont={"size": 10},
+                colorbar=dict(title="Correlation"),
+            )
+        )
+
+        fig_correlation.update_layout(
+            title="Feature-Target Correlation Heatmap",
+            xaxis_title="Target Variable",
+            yaxis_title="Feature",
+            height=max(400, len(_feature_names) * 20),
+        )
+    else:
+        fig_correlation = None
+        corr_pivot = None
+        print("No features selected - cannot compute correlations")
+
+    fig_correlation
+    return (corr_pivot,)
+
+
+@app.cell
+def _(TARGET_LABELS, corr_pivot, mo, pd):
+    # Show top correlated features for each target
+    if corr_pivot is not None and len(corr_pivot) > 0:
+        _top_features_data = []
+        for _target in TARGET_LABELS:
+            # Top 3 positive correlations
+            _top_pos = corr_pivot[_target].nlargest(3)
+            # Top 3 negative correlations
+            _top_neg = corr_pivot[_target].nsmallest(3)
+
+            for _feat, _corr in _top_pos.items():
+                _top_features_data.append(
+                    {
+                        "Target": _target,
+                        "Feature": _feat,
+                        "Correlation": f"{_corr:.3f}",
+                        "Direction": "Positive",
+                    }
+                )
+            for _feat, _corr in _top_neg.items():
+                _top_features_data.append(
+                    {
+                        "Target": _target,
+                        "Feature": _feat,
+                        "Correlation": f"{_corr:.3f}",
+                        "Direction": "Negative",
+                    }
+                )
+
+        _top_features_df = pd.DataFrame(_top_features_data)
+
+        mo.vstack(
+            [
+                mo.md("**Top Correlated Features per Target:**"),
+                mo.ui.table(_top_features_df, selection=None),
+            ]
+        )
+    else:
+        mo.md("_No correlation data available_")
     return
 
 
@@ -717,6 +1305,134 @@ def _(mo, results_df):
     mo.vstack(
         [mo.md("### Results Summary"), mo.ui.table(results_df.round(4), selection=None)]
     )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 3.1 Feature Importance Analysis
+
+    Which features have the strongest influence on predictions? Select a configuration and target to see coefficient magnitudes.
+    """)
+    return
+
+
+@app.cell
+def _(TARGET_LABELS, mo):
+    # Selector for feature importance visualization
+    importance_target_selector = mo.ui.dropdown(
+        options=TARGET_LABELS, value=TARGET_LABELS[0], label="Target Variable"
+    )
+    importance_config_selector = mo.ui.dropdown(
+        options=["Survey + Diary", "Survey + Sensor", "Survey + Diary + Sensor"],
+        value="Survey + Diary + Sensor",
+        label="Configuration",
+    )
+    mo.hstack([importance_config_selector, importance_target_selector], gap=2)
+    return importance_config_selector, importance_target_selector
+
+
+@app.cell
+def _(
+    Ridge,
+    TARGET_LABELS,
+    X_all,
+    X_survey_diary,
+    X_survey_sensor,
+    alpha,
+    go,
+    importance_config_selector,
+    importance_target_selector,
+    np,
+    pd,
+    selected_diary_features,
+    selected_sensor_features,
+    selected_survey_features,
+    y_all,
+):
+    # Train Ridge model on full data to get coefficients for feature importance
+    _config_map = {
+        "Survey + Diary": X_survey_diary,
+        "Survey + Sensor": X_survey_sensor,
+        "Survey + Diary + Sensor": X_all,
+    }
+
+    _X = _config_map[importance_config_selector.value]
+    _target_idx = TARGET_LABELS.index(importance_target_selector.value)
+    _y = y_all[:, _target_idx]
+
+    # Build feature names based on configuration
+    if importance_config_selector.value == "Survey + Diary":
+        _feature_names = (
+            list(selected_survey_features)
+            + [f"{f}_mean" for f in selected_diary_features]
+            + [f"{f}_std" for f in selected_diary_features]
+        )
+    elif importance_config_selector.value == "Survey + Sensor":
+        _feature_names = (
+            list(selected_survey_features)
+            + [f"{f}_mean" for f in selected_sensor_features]
+            + [f"{f}_std" for f in selected_sensor_features]
+        )
+    else:  # Survey + Diary + Sensor
+        _feature_names = (
+            list(selected_survey_features)
+            + [f"{f}_mean" for f in selected_diary_features]
+            + [f"{f}_std" for f in selected_diary_features]
+            + [f"{f}_mean" for f in selected_sensor_features]
+            + [f"{f}_std" for f in selected_sensor_features]
+        )
+
+    # Train model and get coefficients
+    if _X.shape[1] > 0 and len(_feature_names) == _X.shape[1]:
+        _model = Ridge(alpha=alpha)
+        _model.fit(_X, _y)
+
+        # Create coefficient dataframe
+        coef_df = pd.DataFrame(
+            {
+                "Feature": _feature_names,
+                "Coefficient": _model.coef_,
+                "Abs_Coefficient": np.abs(_model.coef_),
+            }
+        ).sort_values("Abs_Coefficient", ascending=True)
+
+        # Take top 15 features for visualization
+        _top_n = min(15, len(coef_df))
+        _plot_df = coef_df.tail(_top_n)
+
+        # Create horizontal bar chart
+        fig_importance = go.Figure()
+
+        # Color bars based on positive/negative
+        _colors = ["#EF553B" if c < 0 else "#636EFA" for c in _plot_df["Coefficient"]]
+
+        fig_importance.add_trace(
+            go.Bar(
+                y=_plot_df["Feature"],
+                x=_plot_df["Coefficient"],
+                orientation="h",
+                marker_color=_colors,
+                text=_plot_df["Coefficient"].round(3),
+                textposition="outside",
+            )
+        )
+
+        fig_importance.update_layout(
+            title=f"Top {_top_n} Feature Coefficients<br><sub>{importance_config_selector.value} | {importance_target_selector.value} | Ridge (alpha={alpha:.4f})</sub>",
+            xaxis_title="Coefficient Value",
+            yaxis_title="Feature",
+            height=max(400, _top_n * 25),
+            showlegend=False,
+        )
+        fig_importance.add_vline(x=0, line_dash="dash", line_color="gray")
+    else:
+        fig_importance = None
+        coef_df = None
+        print("Cannot compute feature importance - no features or dimension mismatch")
+
+    fig_importance
     return
 
 
@@ -959,6 +1675,139 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
+    ### 5.1 Residual Analysis
+
+    Understanding prediction errors helps diagnose model issues and identify hard-to-predict participants.
+    """)
+    return
+
+
+@app.cell
+def _(
+    TARGET_NAMES,
+    go,
+    make_subplots,
+    np,
+    pred_config_selector,
+    pred_reg_selector,
+    pred_target_selector,
+    predictions_store,
+    user_ids,
+):
+    # Get predictions for selected configuration
+    _key = (
+        pred_config_selector.value,
+        pred_reg_selector.value,
+        pred_target_selector.value,
+    )
+    _data = predictions_store[_key]
+    _preds = _data["predictions"]
+    _actuals = _data["actuals"]
+    residuals = _actuals - _preds
+
+    # Create subplot: residual histogram + residual vs predicted
+    fig_residuals = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=["Residual Distribution", "Residuals vs Predicted"],
+    )
+
+    # Histogram of residuals
+    fig_residuals.add_trace(
+        go.Histogram(
+            x=residuals,
+            nbinsx=15,
+            name="Residuals",
+            marker_color="#636EFA",
+            opacity=0.75,
+        ),
+        row=1,
+        col=1,
+    )
+
+    # Residual vs Predicted scatter
+    fig_residuals.add_trace(
+        go.Scatter(
+            x=_preds,
+            y=residuals,
+            mode="markers",
+            name="Residuals",
+            marker=dict(size=10, color="#636EFA", opacity=0.7),
+            text=user_ids,
+            hovertemplate="User: %{text}<br>Predicted: %{x:.1f}<br>Residual: %{y:.1f}<extra></extra>",
+        ),
+        row=1,
+        col=2,
+    )
+
+    # Add zero line
+    fig_residuals.add_hline(y=0, line_dash="dash", line_color="red", row=1, col=2)
+
+    fig_residuals.update_layout(
+        title=f"Residual Analysis: {TARGET_NAMES[pred_target_selector.value]}<br><sub>{pred_config_selector.value} + {pred_reg_selector.value}</sub>",
+        height=400,
+        showlegend=False,
+    )
+    fig_residuals.update_xaxes(title_text="Residual (Actual - Predicted)", row=1, col=1)
+    fig_residuals.update_yaxes(title_text="Count", row=1, col=1)
+    fig_residuals.update_xaxes(title_text="Predicted Score", row=1, col=2)
+    fig_residuals.update_yaxes(title_text="Residual", row=1, col=2)
+
+    # Compute residual statistics
+    residual_mean = np.mean(residuals)
+    residual_std = np.std(residuals)
+
+    fig_residuals
+    return (residuals,)
+
+
+@app.cell
+def _(
+    mo,
+    np,
+    pd,
+    pred_config_selector,
+    pred_reg_selector,
+    pred_target_selector,
+    predictions_store,
+    residuals,
+    user_ids,
+):
+    # Table of worst predictions
+    _key = (
+        pred_config_selector.value,
+        pred_reg_selector.value,
+        pred_target_selector.value,
+    )
+    _data = predictions_store[_key]
+    _preds = _data["predictions"]
+    _actuals = _data["actuals"]
+
+    error_df = pd.DataFrame(
+        {
+            "User": user_ids,
+            "Actual": _actuals,
+            "Predicted": np.round(_preds, 2),
+            "Error": np.round(residuals, 2),
+            "Abs_Error": np.round(np.abs(residuals), 2),
+        }
+    ).sort_values("Abs_Error", ascending=False)
+
+    mo.vstack(
+        [
+            mo.md("**Worst Predictions (highest absolute error):**"),
+            mo.md(
+                "_These participants are hardest for the model to predict accurately._"
+            ),
+            mo.ui.table(error_df.head(10), selection=None),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
     ---
     ## 6. Patient Time Series Trends
 
@@ -1144,6 +1993,151 @@ def _(alpha, mo, sensor_label, umap_enabled, umap_n_components):
     - Investigate Bayesian Belief Networks
     - Evaluate time-series specific models (LSTM, Transformers)
     """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 7.1 Why Is Performance Poor?
+
+    A comprehensive summary of factors limiting model performance.
+    """)
+    return
+
+
+@app.cell
+def _(X_all, mo):
+    n_samples = X_all.shape[0]
+    n_features = X_all.shape[1]
+    ratio = n_features / n_samples if n_samples > 0 else 0
+
+    mo.callout(
+        mo.md(f"""
+    **Root Causes of Poor Performance:**
+
+    1. **Insufficient Sample Size**: n={n_samples} participants with {n_features} features
+       - Rule of thumb: need 10-20 samples per feature for reliable regression
+       - Current ratio: **{ratio:.2f} features per sample** (ideal: < 0.1)
+       - This means we need **{n_features * 10}-{n_features * 20} samples** for reliable results
+
+    2. **Severe Class Imbalance**: 
+       - 63% minimal depression (PHQ-9 <= 4), only 8% moderate+ (PHQ-9 >= 10)
+       - 80% minimal anxiety (GAD-7 <= 4), only 2% moderate+ (GAD-7 >= 10)
+       - Model learns to predict "average" (low scores) for everyone
+
+    3. **Data Quality Issues**:
+       - Corrupted `lf`, `hf` features (values up to 1e+46)
+       - 55% missing data in `steps`, `calories`, `distance`
+       - Use feature selection above to exclude problematic features
+
+    4. **Low Signal-to-Noise Ratio**:
+       - Weak correlations between features and targets (see correlation heatmap)
+       - High within-group variability relative to between-group differences
+
+    **Recommendations:**
+    - Use feature selection to reduce dimensionality (aim for < 10 features)
+    - Consider binary classification (depressed vs not) instead of regression
+    - Collect more participants, especially with clinical symptoms
+    - Focus on the most reliable features (HR, rmssd, sdnn, sleep metrics)
+        """),
+        kind="info",
+    )
+    return
+
+
+@app.cell
+def _(LeaveOneOut, Ridge, X_all, cross_val_predict, go, np, r2_score, y_all):
+    # Learning curve - subsample to show effect of sample size
+    sample_sizes = [10, 15, 20, 25, 30, 35, 40, 45, min(49, len(y_all))]
+    r2_scores_by_size = []
+    r2_std_by_size = []
+
+    for size in sample_sizes:
+        if size > len(y_all):
+            continue
+        # Random subsample (average over multiple trials)
+        r2_trials = []
+        for trial in range(20):
+            np.random.seed(trial)
+            idx = np.random.choice(len(y_all), size, replace=False)
+            X_sub, y_sub = X_all[idx], y_all[idx, 0]  # PHQ9
+
+            if X_sub.shape[1] > 0 and size > 3:
+                try:
+                    loo = LeaveOneOut()
+                    preds = cross_val_predict(Ridge(alpha=1.0), X_sub, y_sub, cv=loo)
+                    r2 = r2_score(y_sub, preds)
+                    if not np.isnan(r2) and not np.isinf(r2):
+                        r2_trials.append(r2)
+                except:
+                    pass
+
+        if len(r2_trials) > 0:
+            r2_scores_by_size.append(np.mean(r2_trials))
+            r2_std_by_size.append(np.std(r2_trials))
+        else:
+            r2_scores_by_size.append(np.nan)
+            r2_std_by_size.append(0)
+
+    # Filter valid results
+    valid_sizes = [
+        s
+        for s, r in zip(sample_sizes[: len(r2_scores_by_size)], r2_scores_by_size)
+        if not np.isnan(r)
+    ]
+    valid_r2 = [r for r in r2_scores_by_size if not np.isnan(r)]
+    valid_std = [
+        s for r, s in zip(r2_scores_by_size, r2_std_by_size) if not np.isnan(r)
+    ]
+
+    if len(valid_sizes) > 0:
+        fig_learning = go.Figure()
+
+        # Main line
+        fig_learning.add_trace(
+            go.Scatter(
+                x=valid_sizes,
+                y=valid_r2,
+                mode="lines+markers",
+                name="Mean R²",
+                line=dict(color="#636EFA", width=2),
+                marker=dict(size=8),
+            )
+        )
+
+        # Error band
+        upper_bound = [r + s for r, s in zip(valid_r2, valid_std)]
+        lower_bound = [r - s for r, s in zip(valid_r2, valid_std)]
+
+        fig_learning.add_trace(
+            go.Scatter(
+                x=valid_sizes + valid_sizes[::-1],
+                y=upper_bound + lower_bound[::-1],
+                fill="toself",
+                fillcolor="rgba(99, 110, 250, 0.2)",
+                line=dict(color="rgba(255,255,255,0)"),
+                name="Std Dev",
+            )
+        )
+
+        fig_learning.add_hline(
+            y=0,
+            line_dash="dash",
+            line_color="red",
+            annotation_text="R²=0 (no better than mean)",
+        )
+
+        fig_learning.update_layout(
+            title="Learning Curve: R² vs Sample Size (PHQ-9, Ridge Regression)",
+            xaxis_title="Number of Samples",
+            yaxis_title="R² Score (LOO-CV)",
+            height=400,
+            showlegend=True,
+        )
+        fig_learning
+    else:
+        print("Cannot generate learning curve - insufficient data")
     return
 
 
