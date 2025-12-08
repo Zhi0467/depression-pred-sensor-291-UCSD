@@ -1,9 +1,0 @@
-torch
-pandas
-scikit-learn
-numpy
-matplotlib
-pytest
-marimo
-plotly
-umap-learn

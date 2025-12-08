@@ -154,8 +154,6 @@ def _(os, sys):
         "coffee",
         "smoking",
         "drinking",
-        "height",
-        "weight",
     ]
 
     DIARY_FEATURE_COLS = [
