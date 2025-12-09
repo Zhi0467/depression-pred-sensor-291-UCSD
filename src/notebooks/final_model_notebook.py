@@ -651,89 +651,63 @@ def _(mo):
 @app.cell
 def _(DIARY_FEATURE_COLS, SENSOR_FEATURE_COLS, SURVEY_FEATURE_COLS, mo):
     # Define problematic features (corrupted or high missing)
-    PROBLEMATIC_SENSOR_FEATURES = {"lf", "hf", "steps", "calories"}
+    _PROBLEMATIC_SENSOR_FEATURES = {"lf", "hf", "steps", "calories"}
 
-    # Create feature multiselect for Survey
-    survey_multiselect = mo.ui.multiselect(
-        options=SURVEY_FEATURE_COLS,
-        value=list(SURVEY_FEATURE_COLS),  # All selected by default
-        label="Survey Features",
-    )
-
-    # Create feature multiselect for Diary
-    diary_multiselect = mo.ui.multiselect(
-        options=DIARY_FEATURE_COLS,
-        value=list(DIARY_FEATURE_COLS),  # All selected by default
-        label="Diary Features",
-    )
-
-    # Create feature multiselect for Sensor (problematic ones unselected by default)
+    # Sensor options with problematic ones marked
     _sensor_default = [
-        c for c in SENSOR_FEATURE_COLS if c not in PROBLEMATIC_SENSOR_FEATURES
+        c for c in SENSOR_FEATURE_COLS if c not in _PROBLEMATIC_SENSOR_FEATURES
     ]
     _sensor_options = {
-        (f"{c} [!]" if c in PROBLEMATIC_SENSOR_FEATURES else c): c
+        (f"{c} [!]" if c in _PROBLEMATIC_SENSOR_FEATURES else c): c
         for c in SENSOR_FEATURE_COLS
     }
-    sensor_multiselect = mo.ui.multiselect(
-        options=_sensor_options,
-        value=_sensor_default,  # Problematic features unselected by default
-        label="Sensor Features",
+
+    # Create a form with all feature selection elements
+    # The form prevents values from being sent until "Apply" is clicked
+    feature_selection_form = (
+        mo.md(
+            """
+    **Survey Features (Demographics & Lifestyle):**
+
+    {survey}
+
+    **Sleep Diary Features:**
+
+    {diary}
+
+    **Sensor Features (HRV & Activity):** _[!] = data quality issues_
+
+    {sensor}
+
+    _Click "Apply Feature Selection" to confirm changes and retrain the model._
+    """
+        )
+        .batch(
+            survey=mo.ui.multiselect(
+                options=SURVEY_FEATURE_COLS,
+                value=list(SURVEY_FEATURE_COLS),  # All selected by default
+                label="Survey Features",
+            ),
+            diary=mo.ui.multiselect(
+                options=DIARY_FEATURE_COLS,
+                value=list(DIARY_FEATURE_COLS),  # All selected by default
+                label="Diary Features",
+            ),
+            sensor=mo.ui.multiselect(
+                options=_sensor_options,
+                value=_sensor_default,  # Problematic features unselected by default
+                label="Sensor Features",
+            ),
+        )
+        .form(submit_button_label="Apply Feature Selection")
     )
-    return diary_multiselect, sensor_multiselect, survey_multiselect
+    return (feature_selection_form,)
 
 
 @app.cell
-def _(mo, survey_multiselect):
-    # Survey features section with Select All / Clear All
-    mo.vstack(
-        [
-            mo.md("**Survey Features (Demographics & Lifestyle):**"),
-            survey_multiselect,
-        ]
-    )
-    return
-
-
-@app.cell
-def _(diary_multiselect, mo):
-    # Diary features section
-    mo.vstack(
-        [
-            mo.md("**Sleep Diary Features:**"),
-            diary_multiselect,
-        ]
-    )
-    return
-
-
-@app.cell
-def _(mo, sensor_multiselect):
-    # Sensor features section
-    mo.vstack(
-        [
-            mo.md("**Sensor Features (HRV & Activity):** _[!] = data quality issues_"),
-            sensor_multiselect,
-        ]
-    )
-    return
-
-
-@app.cell
-def _(mo):
-    # Action buttons for feature selection
-    apply_selection_btn = mo.ui.button(label="Apply Feature Selection", kind="success")
-    return (apply_selection_btn,)
-
-
-@app.cell
-def _(apply_selection_btn, mo):
-    # Display the apply button
-    mo.hstack(
-        [apply_selection_btn, mo.md("_Click to apply changes and retrain model_")],
-        justify="start",
-        gap=2,
-    )
+def _(feature_selection_form):
+    # Display the feature selection form
+    feature_selection_form
     return
 
 
@@ -742,30 +716,28 @@ def _(
     DIARY_FEATURE_COLS,
     SENSOR_FEATURE_COLS,
     SURVEY_FEATURE_COLS,
-    apply_selection_btn,
-    diary_multiselect,
+    feature_selection_form,
     mo,
-    sensor_multiselect,
-    survey_multiselect,
 ):
-    # When button is clicked, capture the current selection as "confirmed"
-    # The button click triggers this cell to re-run
-    _click_count = apply_selection_btn.value
+    # Extract selected features from the form
+    # form.value is None until the form is submitted for the first time
+    _form_value = feature_selection_form.value
 
-    # Get selected features from multiselects
-    selected_survey_features = list(survey_multiselect.value)
-    selected_diary_features = list(diary_multiselect.value)
-    selected_sensor_features = list(sensor_multiselect.value)
-
-    # Calculate totals
-    _total_selected = (
-        len(selected_survey_features)
-        + len(selected_diary_features)
-        + len(selected_sensor_features)
-    )
-    _total_available = (
-        len(SURVEY_FEATURE_COLS) + len(DIARY_FEATURE_COLS) + len(SENSOR_FEATURE_COLS)
-    )
+    # Use default values if form hasn't been submitted yet
+    if _form_value is None:
+        # Default selections (same as initial form values)
+        _PROBLEMATIC_SENSOR_FEATURES = {"lf", "hf", "steps", "calories"}
+        selected_survey_features = list(SURVEY_FEATURE_COLS)
+        selected_diary_features = list(DIARY_FEATURE_COLS)
+        selected_sensor_features = [
+            c for c in SENSOR_FEATURE_COLS if c not in _PROBLEMATIC_SENSOR_FEATURES
+        ]
+        _form_submitted = False
+    else:
+        selected_survey_features = list(_form_value["survey"])
+        selected_diary_features = list(_form_value["diary"])
+        selected_sensor_features = list(_form_value["sensor"])
+        _form_submitted = True
 
     # Calculate aggregated feature count (mean + std for diary and sensor)
     total_model_features = (
@@ -782,7 +754,7 @@ def _(
         [
             mo.callout(
                 mo.md(f"""
-    **Current Feature Selection (Applied):**
+    **Current Feature Selection {"(Applied)" if _form_submitted else "(Default - click Apply to change)"}:**
     - Survey: **{len(selected_survey_features)}/{len(SURVEY_FEATURE_COLS)}** features
     - Diary: **{len(selected_diary_features)}/{len(DIARY_FEATURE_COLS)}** features ({len(selected_diary_features) * 2} after aggregation)
     - Sensor: **{len(selected_sensor_features)}/{len(SENSOR_FEATURE_COLS)}** features ({len(selected_sensor_features) * 2} after aggregation)
