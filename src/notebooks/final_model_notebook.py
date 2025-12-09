@@ -10,6 +10,8 @@
 #     "umap-learn",
 #     "altair==6.0.0",
 #     "vegafusion==2.0.3",
+#     "pgmpy",
+#     "networkx",
 # ]
 # ///
 
@@ -67,7 +69,7 @@ def _():
 
     # Scikit-learn
     from sklearn.preprocessing import StandardScaler
-    from sklearn.linear_model import Ridge, Lasso
+    from sklearn.linear_model import Ridge, Lasso, LinearRegression
     from sklearn.model_selection import LeaveOneOut, cross_val_predict
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     from sklearn.pipeline import Pipeline
@@ -88,6 +90,7 @@ def _():
     return (
         Lasso,
         LeaveOneOut,
+        LinearRegression,
         Ridge,
         StandardScaler,
         cross_val_predict,
@@ -976,8 +979,11 @@ def _(
     print(f"  Survey + Diary + Sensor: {X_all.shape}")
     return (
         X_all,
+        X_diary_scaled,
         X_sensor_reduced,
+        X_sensor_scaled,
         X_survey_diary,
+        X_survey_scaled,
         X_survey_sensor,
         sensor_label,
     )
@@ -1440,7 +1446,500 @@ def _(
 def _(mo):
     mo.md(r"""
     ---
-    ## 4. Model Comparison Visualizations
+    ## 4. Bayesian Causal Analysis
+
+    In this section, we use **Greedy Equivalence Search (GES)** to learn the causal structure among features and mental health outcomes. Unlike correlation analysis which only shows associations, Bayesian Belief Networks (BBNs) model directed dependencies that suggest potential causal relationships.
+
+    ### Approach:
+    1. Combine selected features (survey, diary, sensor) with target variables (PHQ-9, GAD-7, ISI)
+    2. Learn DAG structure using GES algorithm with BIC scoring
+    3. Visualize the learned causal graph
+    4. Evaluate predictive performance using Leave-One-Out CV
+    """)
+    return
+
+
+@app.cell
+def _():
+    # Import pgmpy for Bayesian Network structure learning
+    from pgmpy.estimators import GES
+    from pgmpy.estimators import BICGauss
+    import networkx as nx
+
+    print("pgmpy imports successful!")
+    return BICGauss, GES, nx
+
+
+@app.cell
+def _(mo):
+    mo.callout(
+        mo.md("""
+    **Sample Size Warning:**
+
+    With only **n=49 participants** and potentially many features, structure learning algorithms may:
+    - Learn sparse or empty DAGs (few/no edges detected)
+    - Miss true causal relationships due to insufficient statistical power
+    - Be sensitive to the specific feature selection
+
+    For more robust causal discovery, consider reducing the number of features or collecting more samples.
+        """),
+        kind="warn",
+    )
+    return
+
+
+@app.cell
+def _(
+    TARGET_LABELS,
+    X_diary_scaled,
+    X_sensor_scaled,
+    X_survey_scaled,
+    np,
+    pd,
+    selected_diary_features,
+    selected_sensor_features,
+    selected_survey_features,
+    y_all,
+):
+    # Prepare data for Bayesian Network structure learning
+    # Combine all selected features (without UMAP) + target variables
+
+    # Helper function to sanitize column names for pgmpy compatibility
+    # (@ and / characters cause parsing issues in pgmpy's formula evaluation)
+    def _sanitize_column_name(name):
+        return name.replace("@", "_").replace("/", "_")
+
+    # Build feature names
+    _raw_feature_names = (
+        list(selected_survey_features)
+        + [f"{f}_mean" for f in selected_diary_features]
+        + [f"{f}_std" for f in selected_diary_features]
+        + [f"{f}_mean" for f in selected_sensor_features]
+        + [f"{f}_std" for f in selected_sensor_features]
+    )
+
+    # Sanitize feature names for pgmpy
+    bbn_feature_names = [_sanitize_column_name(f) for f in _raw_feature_names]
+
+    # Combine feature matrices (using scaled versions without UMAP)
+    _X_bbn_combined = np.hstack([X_survey_scaled, X_diary_scaled, X_sensor_scaled])
+
+    # Combine with targets
+    _bbn_all_data = np.hstack([_X_bbn_combined, y_all])
+    bbn_all_columns = bbn_feature_names + list(TARGET_LABELS)
+
+    # Create DataFrame for pgmpy
+    bbn_df = pd.DataFrame(_bbn_all_data, columns=bbn_all_columns)
+
+    # Clean any remaining NaN/inf values
+    bbn_df = bbn_df.replace([np.inf, -np.inf], np.nan)
+    bbn_df = bbn_df.fillna(bbn_df.mean())
+
+    print(f"BBN DataFrame shape: {bbn_df.shape}")
+    print(f"Features: {len(bbn_feature_names)}, Targets: {len(TARGET_LABELS)}")
+    print(f"Total variables: {len(bbn_all_columns)}")
+    return bbn_all_columns, bbn_df
+
+
+@app.cell
+def _(BICGauss, GES, bbn_df, mo):
+    # Run GES algorithm for structure learning
+    print("Running Greedy Equivalence Search (GES)...")
+
+    try:
+        _ges_estimator = GES(bbn_df)
+        _learned_model = _ges_estimator.estimate(scoring_method=BICGauss(bbn_df))
+        learned_edges = list(_learned_model.edges())
+
+        print(f"GES completed! Learned {len(learned_edges)} edges.")
+
+        if len(learned_edges) > 0:
+            print("\nLearned edges:")
+            for _edge in learned_edges:
+                print(f"  {_edge[0]} -> {_edge[1]}")
+        else:
+            print("\nNo edges learned - DAG is empty.")
+            print("This may indicate insufficient sample size or weak relationships.")
+
+        _ges_success = True
+    except Exception as e:
+        print(f"GES failed with error: {e}")
+        learned_edges = []
+        _ges_success = False
+
+    if not _ges_success:
+        mo.callout(
+            mo.md(
+                "**GES algorithm failed.** This may be due to data issues or insufficient samples."
+            ),
+            kind="danger",
+        )
+    return (learned_edges,)
+
+
+@app.cell
+def _(
+    TARGET_LABELS,
+    bbn_all_columns,
+    go,
+    learned_edges,
+    nx,
+    selected_diary_features,
+    selected_survey_features,
+):
+    # Visualize the learned DAG
+    def _get_node_category_color(node_name):
+        """Return color based on variable category."""
+        if node_name in TARGET_LABELS:
+            return "#e74c3c"  # Red - Target variables
+        elif node_name in selected_survey_features:
+            return "#3498db"  # Blue - Survey/Demographics
+        elif (
+            any(node_name.startswith(f"{f}_") for f in selected_diary_features)
+            or node_name in selected_diary_features
+        ):
+            return "#2ecc71"  # Green - Sleep diary
+        else:
+            return "#f39c12"  # Orange - Sensor/HRV
+
+    # Build networkx graph
+    _G_dag = nx.DiGraph()
+    _G_dag.add_nodes_from(bbn_all_columns)
+    _G_dag.add_edges_from(learned_edges)
+
+    # Only visualize if we have edges
+    if len(learned_edges) > 0:
+        # Get node colors
+        _node_colors = [_get_node_category_color(node) for node in _G_dag.nodes()]
+
+        # Use spring layout
+        _pos = nx.spring_layout(_G_dag, k=2, iterations=50, seed=42)
+
+        # Create edge traces
+        _edge_x = []
+        _edge_y = []
+        for _edge in _G_dag.edges():
+            _x0, _y0 = _pos[_edge[0]]
+            _x1, _y1 = _pos[_edge[1]]
+            _edge_x.extend([_x0, _x1, None])
+            _edge_y.extend([_y0, _y1, None])
+
+        _edge_trace = go.Scatter(
+            x=_edge_x,
+            y=_edge_y,
+            line=dict(width=2, color="#888"),
+            hoverinfo="none",
+            mode="lines",
+        )
+
+        # Create node traces
+        _node_x = [_pos[node][0] for node in _G_dag.nodes()]
+        _node_y = [_pos[node][1] for node in _G_dag.nodes()]
+
+        _node_trace = go.Scatter(
+            x=_node_x,
+            y=_node_y,
+            mode="markers+text",
+            hoverinfo="text",
+            text=list(_G_dag.nodes()),
+            textposition="top center",
+            textfont=dict(size=10),
+            marker=dict(
+                size=20,
+                color=_node_colors,
+                line=dict(width=2, color="white"),
+            ),
+        )
+
+        # Create figure
+        _fig_dag = go.Figure(
+            data=[_edge_trace, _node_trace],
+            layout=go.Layout(
+                title=f"Learned Causal DAG (GES Algorithm) - {len(learned_edges)} edges",
+                showlegend=False,
+                hovermode="closest",
+                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                height=600,
+                annotations=[
+                    dict(
+                        text="Node colors: Blue=Survey, Green=Diary, Orange=Sensor, Red=Target",
+                        showarrow=False,
+                        xref="paper",
+                        yref="paper",
+                        x=0.5,
+                        y=-0.05,
+                        font=dict(size=12),
+                    )
+                ],
+            ),
+        )
+    else:
+        # Empty DAG - show message
+        _fig_dag = go.Figure()
+        _fig_dag.add_annotation(
+            text="No edges learned by GES algorithm.<br>The DAG is empty.",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font=dict(size=16),
+        )
+        _fig_dag.update_layout(
+            title="Learned Causal DAG (GES Algorithm) - Empty",
+            height=400,
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        )
+
+    _fig_dag
+    return
+
+
+@app.cell
+def _(TARGET_LABELS, learned_edges, mo, pd):
+    # Analyze edges involving target variables
+    _target_edges = []
+    for _edge in learned_edges:
+        if _edge[0] in TARGET_LABELS or _edge[1] in TARGET_LABELS:
+            _direction = "causes" if _edge[1] in TARGET_LABELS else "is caused by"
+            _target_edges.append(
+                {
+                    "Edge": f"{_edge[0]} -> {_edge[1]}",
+                    "Interpretation": f"{_edge[0]} {_direction} {_edge[1]}",
+                }
+            )
+
+    if len(_target_edges) > 0:
+        _target_edges_df = pd.DataFrame(_target_edges)
+        mo.vstack(
+            [
+                mo.md("### Edges Involving Mental Health Targets"),
+                mo.md(
+                    "These edges suggest potential causal relationships with depression, anxiety, and insomnia scores:"
+                ),
+                mo.ui.table(_target_edges_df, selection=None),
+            ]
+        )
+    else:
+        mo.callout(
+            mo.md(
+                "**No edges involving target variables were learned.** This suggests the algorithm did not find strong enough evidence for direct causal links between features and mental health outcomes with the current sample size."
+            ),
+            kind="info",
+        )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ### 4.1 BBN Predictive Evaluation
+
+    We evaluate the learned DAG by fitting a Linear Gaussian model for each target variable using its parent nodes as predictors. This uses Leave-One-Out Cross-Validation for consistency with baseline models.
+    """)
+    return
+
+
+@app.cell
+def _(
+    LeaveOneOut,
+    LinearRegression,
+    TARGET_LABELS,
+    bbn_df,
+    cross_val_predict,
+    learned_edges,
+    mean_absolute_error,
+    np,
+    pd,
+    r2_score,
+):
+    # Helper function to get parent nodes (local to this cell)
+    def _get_parents_from_edges(edges, node):
+        """Get parent nodes for a given node in a DAG."""
+        return [edge[0] for edge in edges if edge[1] == node]
+
+    # Evaluate BBN using LOO-CV
+    _bbn_results = []
+
+    for _target in TARGET_LABELS:
+        _parents = _get_parents_from_edges(learned_edges, _target)
+        _y_target = bbn_df[_target].values
+
+        if len(_parents) > 0:
+            # Use parents as predictors
+            _X_parents = bbn_df[_parents].values
+
+            # LOO-CV prediction
+            _loo = LeaveOneOut()
+            _model = LinearRegression()
+            try:
+                _predictions = cross_val_predict(_model, _X_parents, _y_target, cv=_loo)
+
+                # Compute metrics
+                _mae = mean_absolute_error(_y_target, _predictions)
+                _y_range = np.max(_y_target) - np.min(_y_target)
+                _nmae = _mae / _y_range if _y_range > 0 else 0
+                _r2 = r2_score(_y_target, _predictions)
+                _corr = np.corrcoef(_y_target, _predictions)[0, 1]
+
+                _bbn_results.append(
+                    {
+                        "Target": _target,
+                        "Parents": ", ".join(_parents),
+                        "Num_Parents": len(_parents),
+                        "MAE": _mae,
+                        "NMAE": _nmae,
+                        "R2": _r2,
+                        "Correlation": _corr if not np.isnan(_corr) else 0,
+                    }
+                )
+            except Exception as _e:
+                print(f"Error evaluating {_target}: {_e}")
+                _bbn_results.append(
+                    {
+                        "Target": _target,
+                        "Parents": ", ".join(_parents),
+                        "Num_Parents": len(_parents),
+                        "MAE": np.nan,
+                        "NMAE": np.nan,
+                        "R2": np.nan,
+                        "Correlation": np.nan,
+                    }
+                )
+        else:
+            # No parents - predict using mean (baseline)
+            _mean_pred = np.mean(_y_target)
+            _predictions = np.full_like(_y_target, _mean_pred)
+            _mae = mean_absolute_error(_y_target, _predictions)
+            _y_range = np.max(_y_target) - np.min(_y_target)
+            _nmae = _mae / _y_range if _y_range > 0 else 0
+
+            _bbn_results.append(
+                {
+                    "Target": _target,
+                    "Parents": "(none - using mean)",
+                    "Num_Parents": 0,
+                    "MAE": _mae,
+                    "NMAE": _nmae,
+                    "R2": 0.0,
+                    "Correlation": 0.0,
+                }
+            )
+
+    bbn_results_df = pd.DataFrame(_bbn_results)
+    print("BBN Evaluation Complete!")
+    return (bbn_results_df,)
+
+
+@app.cell
+def _(bbn_results_df, mo):
+    # Display BBN results
+    mo.vstack(
+        [
+            mo.md("### BBN Predictive Performance (LOO-CV)"),
+            mo.ui.table(bbn_results_df.round(4), selection=None),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(bbn_results_df, mo, pd, results_df):
+    # Compare BBN vs Baseline models
+    # Get best baseline results for each target
+    _baseline_comparison = []
+
+    for _, _bbn_row in bbn_results_df.iterrows():
+        _target = _bbn_row["Target"]
+        # Find best baseline R2 for this target
+        _target_baseline = results_df[results_df["Target"] == _target]
+        if len(_target_baseline) > 0:
+            _best_baseline_r2 = _target_baseline["R2"].max()
+            _best_baseline_config = _target_baseline.loc[
+                _target_baseline["R2"].idxmax(), "Configuration"
+            ]
+        else:
+            _best_baseline_r2 = 0
+            _best_baseline_config = "N/A"
+
+        _baseline_comparison.append(
+            {
+                "Target": _target,
+                "BBN R2": _bbn_row["R2"],
+                "Best Baseline R2": _best_baseline_r2,
+                "Best Baseline Config": _best_baseline_config,
+                "BBN Better": _bbn_row["R2"] > _best_baseline_r2,
+            }
+        )
+
+    _comparison_df = pd.DataFrame(_baseline_comparison)
+
+    mo.vstack(
+        [
+            mo.md("### BBN vs Baseline Model Comparison"),
+            mo.ui.table(_comparison_df.round(4), selection=None),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(learned_edges, mo):
+    # Interpretation section
+    _n_edges = len(learned_edges)
+
+    if _n_edges > 0:
+        mo.md(f"""
+    ### 4.2 Interpretation of Learned Causal Structure
+
+    The GES algorithm discovered **{_n_edges} directed edges** in the causal graph. Key observations:
+
+    **What the DAG Reveals:**
+    1. **Direct Influences**: Edges pointing TO target variables (PHQ9_F, GAD7_F, ISI_F) suggest features that may directly influence mental health outcomes
+    2. **Indirect Pathways**: Features connected through intermediate nodes may have indirect effects
+    3. **Independence**: Variables without edges are conditionally independent given their parents
+
+    **Causal vs Correlation:**
+    - Unlike the correlation heatmap (Section 2.2), the DAG shows *directed* relationships
+    - An edge A -> B means "knowing A helps predict B, even after accounting for other parents of B"
+    - Missing edges between correlated variables suggest their correlation is explained by common causes
+
+    **Limitations:**
+    - With n=49 samples, the algorithm may miss true causal links (false negatives)
+    - Some edges may be spurious due to limited data (false positives)
+    - DAG structure represents *statistical* dependencies, not necessarily true causation
+    - Unmeasured confounders could explain apparent causal relationships
+
+    **Clinical Implications:**
+    The learned structure can help prioritize which features to target for intervention studies. Features with direct edges to mental health targets are prime candidates for further investigation.
+        """)
+    else:
+        mo.md("""
+    ### 4.2 Interpretation of Empty DAG
+
+    The GES algorithm did not learn any edges, resulting in an empty DAG. This outcome suggests:
+
+    1. **Weak Signal**: The relationships between features and mental health outcomes may be too weak to detect with n=49 samples
+    2. **High Dimensionality**: With many features relative to samples, the algorithm becomes conservative to avoid false positives
+    3. **BIC Penalty**: The Bayesian Information Criterion penalizes model complexity, preferring simpler (empty) models when evidence is weak
+
+    **Recommendations:**
+    - Reduce the number of features using the Feature Selection controls above
+    - Focus on features with strongest correlations from Section 2.2
+    - Consider that mental health outcomes may be influenced by factors not captured in sensor/diary data
+
+    This result is consistent with the baseline model findings showing weak predictive performance.
+        """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ---
+    ## 5. Model Comparison Visualizations
     """)
     return
 
@@ -1568,7 +2067,7 @@ def _(TARGET_LABELS, go, make_subplots, results_df):
 def _(mo):
     mo.md(r"""
     ---
-    ## 5. Predicted vs Actual Analysis
+    ## 6. Predicted vs Actual Analysis
     """)
     return
 
@@ -1675,7 +2174,7 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
-    ### 5.1 Residual Analysis
+    ### 6.1 Residual Analysis
 
     Understanding prediction errors helps diagnose model issues and identify hard-to-predict participants.
     """)
@@ -1809,7 +2308,7 @@ def _(
 def _(mo):
     mo.md(r"""
     ---
-    ## 6. Patient Time Series Trends
+    ## 7. Patient Time Series Trends
 
     Explore individual patient sensor and sleep diary data over time.
     """)
@@ -1935,7 +2434,7 @@ def _(SENSOR_FEATURE_COLS, df_sensor, go, make_subplots, patient_selector, pd):
 def _(mo):
     mo.md(r"""
     ---
-    ## 7. Best Model Summary
+    ## 8. Best Model Summary
     """)
     return
 
@@ -1999,7 +2498,7 @@ def _(alpha, mo, sensor_label, umap_enabled, umap_n_components):
 @app.cell
 def _(mo):
     mo.md(r"""
-    ### 7.1 Why Is Performance Poor?
+    ### 8.1 Why Is Performance Poor?
 
     A comprehensive summary of factors limiting model performance.
     """)
@@ -2145,7 +2644,7 @@ def _(LeaveOneOut, Ridge, X_all, cross_val_predict, go, np, r2_score, y_all):
 def _(mo):
     mo.md(r"""
     ---
-    ## 8. Export Results
+    ## 9. Export Results
     """)
     return
 
