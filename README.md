@@ -36,7 +36,6 @@ Our analysis is a retrospective comparison of three machine learning models to i
         2.  **Sensor-Only Model:** Static + Sensor Features
         3.  **Combined Model:** Static + Sleep + Sensor Features
 
-4. **Evaluation:**
 
 ---
 
